@@ -6,6 +6,8 @@ import path from "path";
 import { tmpdir } from "os";
 import pLimit from "p-limit";
 
+import { spawn, execSync } from "child_process";
+
 const app = express();
 const limit = pLimit(3);
 const YTDLP = "/usr/local/bin/yt-dlp"; // Linux binary installed in Docker
