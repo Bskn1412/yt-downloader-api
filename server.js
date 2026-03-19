@@ -137,6 +137,27 @@ app.get("/api/download", async (req, res) => {
   }
 });
 
+
+/* =========================
+  debug
+========================= */
+
+app.get("/debug", (req, res) => {
+  try {
+    const ytdlpVersion = execSync("yt-dlp --version").toString();
+    const ffmpegVersion = execSync("ffmpeg -version").toString().split("\n")[0];
+
+    res.json({
+      ytDlp: ytdlpVersion,
+      ffmpeg: ffmpegVersion
+    });
+  } catch (e) {
+    res.json({
+      error: e.message
+    });
+  }
+});
+
 /* =========================
    HELPERS
 ========================= */
