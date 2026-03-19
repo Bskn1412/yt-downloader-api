@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-import ytdlp from "yt-dlp-exec";
+import { spawn } from "child_process";
 import { createReadStream, unlinkSync, existsSync, statSync, readdirSync } from "fs";
 import path from "path";
 import { tmpdir } from "os";
@@ -8,6 +8,7 @@ import pLimit from "p-limit";
 
 const app = express();
 const limit = pLimit(3);
+const YTDLP = "/usr/local/bin/yt-dlp"; // Linux binary installed in Docker
 
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
@@ -20,24 +21,17 @@ app.get("/", (req, res) => res.send("YT Downloader API running"));
 ========================= */
 app.post("/api/formats", async (req, res) => {
   const { url } = req.body;
-
   if (!url) return res.status(400).json({ error: "Missing URL" });
 
   try {
-    const data = await ytdlp(url, {
-      dumpSingleJson: true,
-      noWarnings: true,
-      noPlaylist: true
-    });
+    const info = await runYtDlp(url, ["--dump-single-json", "--no-playlist", "--no-warnings"]);
+    const data = JSON.parse(info);
 
     const formats = data.formats || [];
-    const video = [];
-    const videoOnly = [];
-    const audio = [];
+    const video = [], videoOnly = [], audio = [];
 
     for (const f of formats) {
       const size = f.filesize || f.filesize_approx || 0;
-
       const obj = {
         id: f.format_id,
         ext: f.ext,
@@ -47,7 +41,7 @@ app.post("/api/formats", async (req, res) => {
         size,
         vcodec: f.vcodec,
         acodec: f.acodec,
-        abr: f.abr || null
+        abr: f.abr || null,
       };
 
       if (f.vcodec !== "none" && f.acodec !== "none") video.push(obj);
@@ -66,9 +60,9 @@ app.post("/api/formats", async (req, res) => {
         duration: data.duration,
         channel: data.uploader,
         views: data.view_count,
-        uploadDate: data.upload_date
+        uploadDate: data.upload_date,
       },
-      formats: { video, videoOnly, audio }
+      formats: { video, videoOnly, audio },
     });
 
   } catch (err) {
@@ -95,20 +89,24 @@ app.get("/api/download", async (req, res) => {
   const outputTemplate = path.join(tmpDir, `${base}.%(ext)s`);
 
   try {
-    await limit(() =>
-      ytdlp(url, {
-        format: forceMp3
-          ? `${formatId || "bestaudio"}/bestaudio/best`
-          : `${formatId}+bestaudio/best`,
-        extractAudio: forceMp3,
-        audioFormat: forceMp3 ? "mp3" : undefined,
-        audioQuality: mp3Bitrate ? `${mp3Bitrate}K` : undefined,
-        output: outputTemplate,
-        noPlaylist: true,
-        newline: true,
-        quiet: false,
-      })
-    );
+    await limit(() => {
+      const args = [
+        "-f",
+        forceMp3 ? `${formatId || "bestaudio"}/bestaudio/best` : `${formatId}+bestaudio/best`,
+        "--no-playlist",
+        "--newline",
+        "--ffmpeg-location", "/usr/bin", // ffmpeg installed in Docker
+        "-o", outputTemplate,
+        url,
+      ];
+
+      if (forceMp3) {
+        args.unshift("--extract-audio", "--audio-format", "mp3");
+        if (mp3Bitrate) args.push("--audio-quality", `${mp3Bitrate}K`);
+      }
+
+      return runYtDlpProcess(args);
+    });
 
     const finalFile = findDownloadedFile(outputTemplate);
     const ext = path.extname(finalFile).replace(".", "");
@@ -123,18 +121,14 @@ app.get("/api/download", async (req, res) => {
 
     stream.on("close", () => {
       setTimeout(() => {
-        try {
-          if (existsSync(finalFile)) unlinkSync(finalFile);
-        } catch (e) {
-          console.error("Cleanup error:", e);
-        }
+        try { if (existsSync(finalFile)) unlinkSync(finalFile); } 
+        catch (e) { console.error("Cleanup error:", e); }
       }, 1000);
     });
 
     res.setHeader("Content-Type", getMimeType(ext));
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.setHeader("Content-Length", statSync(finalFile).size);
-
     stream.pipe(res);
 
   } catch (err) {
@@ -146,31 +140,44 @@ app.get("/api/download", async (req, res) => {
 /* =========================
    HELPERS
 ========================= */
+function runYtDlp(url, args = []) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(YTDLP, [...args], { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+
+    proc.stdout.on("data", d => { output += d.toString(); });
+    proc.stderr.on("data", d => console.error(d.toString()));
+
+    proc.on("close", code => code === 0 ? resolve(output) : reject(new Error(`yt-dlp exited ${code}`)));
+    proc.on("error", reject);
+  });
+}
+
+function runYtDlpProcess(args = []) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(YTDLP, args, { stdio: "inherit" });
+    proc.on("close", code => code === 0 ? resolve() : reject(new Error(`yt-dlp exited ${code}`)));
+    proc.on("error", reject);
+  });
+}
+
 function findDownloadedFile(template) {
   const dir = path.dirname(template);
   const base = path.basename(template).replace(".%(ext)s", "");
   const files = readdirSync(dir);
-
-  const match = files.find((f) => f.startsWith(base));
+  const match = files.find(f => f.startsWith(base));
   if (!match) throw new Error("Downloaded file not found");
-
   return path.join(dir, match);
 }
 
 function getMimeType(ext) {
   switch (ext) {
-    case "mp4":
-      return "video/mp4";
-    case "webm":
-      return "video/webm";
-    case "mkv":
-      return "video/x-matroska";
-    case "mp3":
-      return "audio/mpeg";
-    case "m4a":
-      return "audio/mp4";
-    default:
-      return "application/octet-stream";
+    case "mp4": return "video/mp4";
+    case "webm": return "video/webm";
+    case "mkv": return "video/x-matroska";
+    case "mp3": return "audio/mpeg";
+    case "m4a": return "audio/mp4";
+    default: return "application/octet-stream";
   }
 }
 
