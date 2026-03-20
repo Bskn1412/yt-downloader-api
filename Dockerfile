@@ -1,6 +1,5 @@
 FROM node:22
 
-# Install dependencies
 RUN apt-get update && \
     apt-get install -y ffmpeg curl && \
     curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
@@ -11,7 +10,7 @@ RUN apt-get update && \
 WORKDIR /usr/src/app
 
 COPY package*.json ./
-RUN npm install --production
+RUN npm install --omit=dev   # modern + cleaner
 
 COPY . .
 
